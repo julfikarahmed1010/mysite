@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>TonPlay Monetized Hub</title>
+    <!-- Tailwind CSS (for styled custom elements) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        darkBg: '#090d16',
+                        cardBg: '#131926',
+                        accentPurp: '#7c3aed',
+                        accentGold: '#f59e0b',
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- React and Babel for runtime processing -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Telegram WebApp SDK -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <!-- Adsgram SDK Integration -->
+    <script src="https://sad.adsgram.ai/js/sad.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: #090d16;
+            color: #ffffff;
+            -webkit-tap-highlight-color: transparent;
+            overflow: hidden;
+        }
+        .hide-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .hide-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+<body class="select-none">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // Custom Hook to manage Adsgram seamlessly
+        function useAdsgram({ blockId, onReward, onError }) {
+            const AdControllerRef = useRef(null);
+
+            useEffect(() => {
+                if (window.Adsgram) {
+                    AdControllerRef.current = window.Adsgram.init({ blockId, debug: true }); // Enable debug for safe verification testing
+                }
+            }, [blockId]);
+
+            return useCallback(async () => {
+                if (AdControllerRef.current) {
+                    try {
+                        await AdControllerRef.current.show(); // Trigger Video rendering
+                        onReward(); // Callback executed successfully
+                    } catch (result) {
+                        onError?.(result); // Trigger warning notifications if closed earlier
+                    }
+                } else {
+                    // Fallback visual mock if adsgram SDK is running on generic testing/non-tg engines
+                    console.warn("Adsgram is running on generic engine. Simulating Ad Completion...");
+                    onError?.({ error: true, description: "Adsgram SDK not initialised. Simulating testing ad." });
+                }
+            }, [onReward, onError]);
+        }
+
+        function App() {
+            // State
+            const [activeTab, setActiveTab] = useState('home');
+            const [user, setUser] = useState({
+                telegram_id: '000000',
+                username: 'TMA_Gamer',
+                balance: 1250,
+                streak: 2,
+                last_daily_claim: null
+            });
+            const [transactions, setTransactions] = useState([]);
+            const [toast, setToast] = useState({ visible: false, message: '', type: 'info' });
+            const [adModal, setAdModal] = useState({ visible: false, resolve: null, reject: null });
+            
+            // Backend Settings
+            const BACKEND_URL = "http://localhost:5000"; // Point this to your hosted instance URL during deployment
+            const useLiveBackend = false; // Toggle to true to dynamically connect to the live Express instance
+            const ADS_BLOCK_ID = "34821"; // Updated block ID
+
+            // Initialization
+            useEffect(() => {
+                if (window.Telegram && window.Telegram.WebApp) {
+                    const tg = window.Telegram.WebApp;
+                    tg.ready();
+                    tg.expand();
+                    tg.setHeaderColor('#090d16');
+                    tg.setBackgroundColor('#090d16');
+
+                    if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
+                        const tgUser = tg.initDataUnsafe.user;
+                        setUser(prev => ({
+                            ...prev,
+                            telegram_id: tgUser.id.toString(),
+                            username: tgUser.username || `${tgUser.first_name} ${tgUser.last_name || ''}`.trim()
+                        }));
+                    }
+                }
+                loadInitialData();
+            }, []);
+
+            const loadInitialData = async () => {
+                if (useLiveBackend) {
+                    try {
+                        const initData = window.Telegram?.WebApp?.initData || '';
+                        const res = await fetch(`${BACKEND_URL}/api/profile`, {
+                            headers: { 'Authorization': `tma ${initData}` }
+                        });
+                        const data = await res.json();
+                        if (data.telegram_id) setUser(data);
+                        
+                        const txRes = await fetch(`${BACKEND_URL}/api/transactions`, {
+                            headers: { 'Authorization': `tma ${initData}` }
+                        });
+                        const txData = await txRes.json();
+                        setTransactions(txData);
+                    } catch (e) {
+                        showToast("Failed to fetch cloud account details.", "error");
+                    }
+                } else {
+                    // Load fallback storage mockup
+                    const cached = localStorage.getItem('local_tma_profile');
+                    if (cached) {
+                        setUser(JSON.parse(cached));
+                    }
+                    const cachedTx = localStorage.getItem('local_tma_tx');
+                    if (cachedTx) {
+                        setTransactions(JSON.parse(cachedTx));
+                    } else {
+                        const sampleTxs = [
+                            { id: 1, type: 'daily_streak', amount: 150, details: "Claimed Day 1 Reward", created_at: new Date().toISOString(), status: "approved" },
+                            { id: 2, type: 'ad_reward', amount: 250, details: "Earning Ad Reward", created_at: new Date().toISOString(), status: "approved" }
+                        ];
+                        setTransactions(sampleTxs);
+                    }
+                }
+            };
+
+            const saveProfileData = (updatedUser) => {
+                setUser(updatedUser);
+                if (!useLiveBackend) {
+                    localStorage.setItem('local_tma_profile', JSON.stringify(updatedUser));
+                }
+            };
+
+            const addTransaction = (type, amount, details, status = "approved") => {
+                const newTx = {
+                    id: Date.now(),
+                    type,
+                    amount,
+                    details,
+                    created_at: new Date().toISOString(),
+                    status
+                };
+                const updatedTxs = [newTx, ...transactions];
+                setTransactions(updatedTxs);
+                if (!useLiveBackend) {
+                    localStorage.setItem('local_tma_tx', JSON.stringify(updatedTxs));
+                }
+            };
+
+            // Custom Notification Toast trigger
+            const showToast = (message, type = 'info') => {
+                setToast({ visible: true, message, type });
+                setTimeout(() => {
+                    setToast(prev => ({ ...prev, visible: false }));
+                }, 3000);
+            };
+
+            // Unified Adsgram SDK Caller with fallback visual simulator
+            const playAdsgramVideo = () => {
+                return new Promise((resolve, reject) => {
+                    if (window.Adsgram) {
+                        const controller = window.Adsgram.init({ blockId: ADS_BLOCK_ID });
+                        controller.show()
+                            .then(() => resolve(true)) // Completed viewing
+                            .catch((err) => {
+                                console.error("Adsgram failed to render:", err);
+                                reject(err);
+                            });
+                    } else {
+                        // Activate dynamic fullscreen UI Simulation for developers running in generic browsers
+                        setAdModal({
+                            visible: true,
+                            resolve: () => {
+                                setAdModal({ visible: false, resolve: null, reject: null });
+                                resolve(true);
+                            },
+                            reject: (err) => {
+                                setAdModal({ visible: false, resolve: null, reject: null });
+                                reject(err);
+                            }
+                        });
+                    }
+                });
+            };
+
+            // 1. HOME SCREEN BUSINESS LOGIC
+            const handleWatchAdClaim = async () => {
+                try {
+                    showToast("Loading Adsgram video...", "info");
+                    await playAdsgramVideo();
+                    
+                    if (useLiveBackend) {
+                        const initData = window.Telegram?.WebApp?.initData || '';
+                        const res = await fetch(`${BACKEND_URL}/api/reward/claim`, {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': `tma ${initData}`
+                            },
+                            body: JSON.stringify({ actionType: 'home_ad' })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            setUser(prev => ({ ...prev, balance: data.balance }));
+                            addTransaction('ad_reward', 250, "Watch Ads & Earn Rewards");
+                            showToast("Received +250 points securely!", "success");
+                        }
+                    } else {
+                        const newBal = user.balance + 250;
+                        saveProfileData({ ...user, balance: newBal });
+                        addTransaction('ad_reward', 250, "Watch Ads & Earn Rewards");
+                        showToast("Simulated Ad reward claimed: +250 points!", "success");
+                    }
+                } catch (e) {
+                    showToast("No ads loaded or user closed early", "error");
+                }
+            };
+
+            const handleDailyClaim = async () => {
+                const today = new Date().toISOString().split('T')[0];
+                if (user.last_daily_claim === today) {
+                    showToast("Daily claim already fulfilled today!", "error");
+                    return;
+                }
+
+                try {
+                    showToast("Verify via ad before claiming...", "info");
+                    await playAdsgramVideo();
+
+                    if (useLiveBackend) {
+                        const initData = window.Telegram?.WebApp?.initData || '';
+                        const res = await fetch(`${BACKEND_URL}/api/reward/daily`, {
+                            method: 'POST',
+                            headers: { 'Authorization': `tma ${initData}` }
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            setUser(prev => ({ ...prev, balance: data.balance, streak: data.streak, last_daily_claim: today }));
+                            addTransaction('daily_streak', data.reward, `Daily Check-In Day ${data.streak}`);
+                            showToast(`Day ${data.streak} bonus of +${data.reward} claimed!`, "success");
+                        }
+                    } else {
+                        const nextStreak = (user.streak % 7) + 1;
+                        const addedPoints = nextStreak * 100;
+                        const updatedUser = {
+                            ...user,
+                            streak: nextStreak,
+                            balance: user.balance + addedPoints,
+                            last_daily_claim: today
+                        };
+                        saveProfileData(updatedUser);
+                        addTransaction('daily_streak', addedPoints, `Daily Check-In Day ${nextStreak}`);
+                        showToast(`Mock: Day ${nextStreak} claimed successfully! (+${addedPoints})`, "success");
+                    }
+                } catch (e) {
+                    showToast("Verification failed. Try again.", "error");
+                }
+            };
+
+            // 2. ACTIVE INTERACTIVE GAMES LOGIC
+            const [activeGame, setActiveGame] = useState(null); // 'tap', 'spin', 'box'
+            
+            // Tap Game parameters
+            const [tapScore, setTapScore] = useState(0);
+            const [tapEnergy, setTapEnergy] = useState(100);
+            const [clicks, setClicks] = useState([]);
+
+            const handleTapperClick = (e) => {
+                if (tapEnergy <= 0) {
+                    showToast("Exhausted. Let energy recharge!", "error");
+                    return;
+                }
+                const rect = e.currentTarget.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                setTapScore(prev => prev + 1);
+                setTapEnergy(prev => Math.max(0, prev - 2));
+                setClicks(prev => [...prev, { id: Date.now(), x, y }]);
+                
+                // Remove tap floating effects from state
+                setTimeout(() => {
+                    setClicks(prev => prev.filter(c => Date.now() - c.id < 1000));
+                }, 800);
+            };
+
+            const claimTapRewards = async () => {
+                if (tapScore <= 0) return;
+                try {
+                    showToast("Verify ad view to secure rewards...", "info");
+                    await playAdsgramVideo();
+
+                    const pointsWon = Math.min(tapScore, 50); // Enforcing limits
+                    if (useLiveBackend) {
+                        const initData = window.Telegram?.WebApp?.initData || '';
+                        const res = await fetch(`${BACKEND_URL}/api/reward/claim`, {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': `tma ${initData}`
+                            },
+                            body: JSON.stringify({ actionType: 'game_tap', score: pointsWon })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            setUser(prev => ({ ...prev, balance: data.balance }));
+                            addTransaction('game_reward', pointsWon, `Tapper score payout`);
+                            showToast(`Secured +${pointsWon} balance!`, "success");
+                        }
+                    } else {
+                        const newBal = user.balance + pointsWon;
+                        saveProfileData({ ...user, balance: newBal });
+                        addTransaction('game_reward', pointsWon, `Tapper score payout`);
+                        showToast(`Secured +${pointsWon} points!`, "success");
+                    }
+                    setTapScore(0);
+                    setActiveGame(null);
+                } catch (err) {
+                    showToast("Failed to verify reward. Ad closed.", "error");
+                }
+            };
+
+            // Wheel Game settings
+            const [isSpinning, setIsSpinning] = useState(false);
+            const [wheelRotation, setWheelRotation] = useState(0);
+            const [spinResult, setSpinResult] = useState(null);
+
+            const handleSpinTrigger = () => {
+                if (isSpinning) return;
+                setIsSpinning(true);
+                setSpinResult(null);
+
+                const degrees = Math.floor(Math.random() * 360) + 1440; // Spinning degrees
+                setWheelRotation(prev => prev + degrees);
+
+                setTimeout(() => {
+                    setIsSpinning(false);
+                    const rewards = [100, 50, 500, 0, 1000, 250];
+                    const chosenIndex = Math.floor(((wheelRotation + degrees) % 360) / 60);
+                    setSpinResult(rewards[chosenIndex]);
+                }, 4000);
+            };
+
+            const claimSpinRewards = async () => {
+                if (spinResult === null) return;
+                try {
+                    showToast("Processing verifying ad...", "info");
+                    await playAdsgramVideo();
+
+                    if (useLiveBackend) {
+                        const initData = window.Telegram?.WebApp?.initData || '';
+                        const res = await fetch(`${BACKEND_URL}/api/reward/claim`, {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': `tma ${initData}`
+                            },
+                            body: JSON.stringify({ actionType: 'game_spin', score: spinResult })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            setUser(prev => ({ ...prev, balance: data.balance }));
+                            addTransaction('game_reward', spinResult, `Wheel claim payout`);
+                            showToast(`Received +${spinResult} coins!`, "success");
+                        }
+                    } else {
+                        const newBal = user.balance + spinResult;
+                        saveProfileData({ ...user, balance: newBal });
+                        addTransaction('game_reward', spinResult, `Wheel claim payout`);
+                        showToast(`Mock: Spin reward of +${spinResult} secured!`, "success");
+                    }
+                    setSpinResult(null);
+                    setActiveGame(null);
+                } catch (e) {
+                    showToast("No claim rewards awarded: Ad bypassed", "error");
+                }
+            };
+
+            // Lucky Box details
+            const [openedBox, setOpenedBox] = useState(null);
+            const [boxPayout, setBoxPayout] = useState(0);
+
+            const handleOpenBox = (boxId) => {
+                if (openedBox !== null) return;
+                const prizes = [150, 300, 500];
+                const prize = prizes[Math.floor(Math.random() * prizes.length)];
+                setOpenedBox(boxId);
+                setBoxPayout(prize);
+            };
+
+            const claimBoxReward = async () => {
+                if (!boxPayout) return;
+                try {
+                    showToast("Authenticating payout claim...", "info");
+                    await playAdsgramVideo();
+
+                    if (useLiveBackend) {
+                        const initData = window.Telegram?.WebApp?.initData || '';
+                        const res = await fetch(`${BACKEND_URL}/api/reward/claim`, {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': `tma ${initData}`
+                            },
+                            body: JSON.stringify({ actionType: 'game_box', score: boxPayout })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            setUser(prev => ({ ...prev, balance: data.balance }));
+                            addTransaction('game_reward', boxPayout, `Lucky Box Claim`);
+                            showToast(`Transferred +${boxPayout} points!`, "success");
+                        }
+                    } else {
+                        const newBal = user.balance + boxPayout;
+                        saveProfileData({ ...user, balance: newBal });
+                        addTransaction('game_reward', boxPayout, `Lucky Box Claim`);
+                        showToast(`Mock Box prize claimed: +${boxPayout} points!`, "success");
+                    }
+                    setOpenedBox(null);
+                    setBoxPayout(0);
+                    setActiveGame(null);
+                } catch (e) {
+                    showToast("Verify failed: Reward discarded", "error");
+                }
+            };
+
+
+            // 3. TASK PAGE LOGIC
+            const [taskCategory, setTaskCategory] = useState('social');
+            const [tasksList, setTasksList] = useState([
+                { id: 'tg_chan', title: 'Join Official Channel', reward: 500, category: 'social', description: 'Join our main announcement network for updates.', status: 'start' },
+                { id: 'twit_fol', title: 'Follow Developer X', reward: 400, category: 'social', description: 'Follow updates on our main development feeds.', status: 'start' },
+                { id: 'ad_mar', title: 'Complete 3 Video Viewings', reward: 300, category: 'daily', description: 'Trigger rewarded elements 3 times successfully.', status: 'start' },
+                { id: 'fren_invite', title: 'Invite 3 Friends', reward: 1500, category: 'achievement', description: 'Use invite link to add users directly.', status: 'start' }
+            ]);
+
+            const handleTaskAction = (task) => {
+                if (task.status === 'start') {
+                    // Simulate task redirection action (e.g. Join Link)
+                    showToast("Opening social link channels...", "info");
+                    setTimeout(() => {
+                        setTasksList(prev => prev.map(t => t.id === task.id ? { ...t, status: 'claim' } : t));
+                    }, 2000);
+                } else if (task.status === 'claim') {
+                    triggerTaskClaimAd(task);
+                }
+            };
+
+            const triggerTaskClaimAd = async (task) => {
+                try {
+                    showToast("Watch validation ad to receive task reward...", "info");
+                    await playAdsgramVideo();
+
+                    if (useLiveBackend) {
+                        const initData = window.Telegram?.WebApp?.initData || '';
+                        const res = await fetch(`${BACKEND_URL}/api/tasks/complete`, {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': `tma ${initData}`
+                            },
+                            body: JSON.stringify({ taskId: task.id, reward: task.reward })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            setUser(prev => ({ ...prev, balance: prev.balance + task.reward }));
+                            addTransaction('task_completion', task.reward, `Completed task: ${task.title}`);
+                            setTasksList(prev => prev.map(t => t.id === task.id ? { ...t, status: 'completed' } : t));
+                            showToast(`Awarded +${task.reward} points!`, "success");
+                        }
+                    } else {
+                        const newBal = user.balance + task.reward;
+                        saveProfileData({ ...user, balance: newBal });
+                        addTransaction('task_completion', task.reward, `Completed task: ${task.title}`);
+                        setTasksList(prev => prev.map(t => t.id === task.id ? { ...t, status: 'completed' } : t));
+                        showToast(`Mock task payout claim +${task.reward} accepted!`, "success");
+                    }
+                } catch (e) {
+                    showToast("Ad validation unsuccessful.", "error");
+                }
+            };
+
+            // 4. WALLET WITHDRAWAL REQUEST LOGIC
+            const [payoutMethod, setPayoutMethod] = useState('TON');
+            const [walletAddress, setWalletAddress] = useState('');
+            const [withdrawAmount, setWithdrawAmount] = useState('');
+
+            const handleWithdrawSubmit = async (e) => {
+                e.preventDefault();
+                const amt = parseInt(withdrawAmount);
+                if (!walletAddress) {
+                    showToast("Wallet validation address required.", "error");
+                    return;
+                }
+                if (!amt || amt < 5000) {
+                    showToast("Minimum limit: 5000 points.", "error");
+                    return;
+                }
+                if (user.balance < amt) {
+                    showToast("Insufficient balance.", "error");
+                    return;
+                }
+
+                try {
+                    if (useLiveBackend) {
+                        const initData = window.Telegram?.WebApp?.initData || '';
+                        const res = await fetch(`${BACKEND_URL}/api/withdraw/request`, {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': `tma ${initData}`
+                            },
+                            body: JSON.stringify({
+                                username: user.username,
+                                address: walletAddress,
+                                method: payoutMethod,
+                                amount: amt
+                            })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            setUser(prev => ({ ...prev, balance: data.balance }));
+                            addTransaction('withdrawal', -amt, `Payout sent to ${walletAddress}`, "pending");
+                            showToast("Withdrawal request filed securely!", "success");
+                        } else {
+                            showToast(data.error || "Request failed", "error");
+                        }
+                    } else {
+                        const newBal = user.balance - amt;
+                        saveProfileData({ ...user, balance: newBal });
+                        addTransaction('withdrawal', -amt, `Payout to ${walletAddress} (${payoutMethod})`, "pending");
+                        showToast("Withdrawal registered! (Awaiting processing)", "success");
+                    }
+                    setWalletAddress('');
+                    setWithdrawAmount('');
+                } catch (err) {
+                    showToast("Cloud connection loss.", "error");
+                }
+            };
+
+            // Constant Recharge Loop inside Tap game engine
+            useEffect(() => {
+                const interval = setInterval(() => {
+                    setTapEnergy(prev => Math.min(100, prev + 1));
+                }, 1500);
+                return () => clearInterval(interval);
+            }, []);
+
+            return (
+                <div class="relative w-full max-w-md h-screen mx-auto flex flex-col justify-between bg-darkBg text-white overflow-hidden shadow-2xl">
+                    
+                    {/* Header Bar */}
+                    <header class="flex items-center justify-between px-5 pt-5 pb-3 border-b border-gray-800/60 bg-[#0c1220]">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-full bg-gradient-to-tr from-accentPurp to-indigo-500 flex items-center justify-center font-bold text-lg text-white shadow-lg">
+                                {user.username.slice(0, 1).toUpperCase()}
+                            </div>
+                            <div>
+                                <h1 class="text-sm font-semibold tracking-wide text-gray-200">@{user.username}</h1>
+                                <p class="text-xs text-gray-500">ID: {user.telegram_id}</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2 bg-[#171f30] px-3 py-1.5 rounded-full border border-gray-800">
+                            <span class="w-5 h-5 bg-accentGold rounded-full flex items-center justify-center text-darkBg font-extrabold text-xs">₮</span>
+                            <span class="font-bold text-sm tracking-tight text-accentGold">{user.balance}</span>
+                        </div>
+                    </header>
+
+                    {/* Main Scrolling Body Canvas */}
+                    <main class="flex-1 overflow-y-auto px-5 py-4 hide-scrollbar">
+                        
+                        {/* 1. HOME SCREEN VIEW */}
+                        {activeTab === 'home' && (
+                            <div class="space-y-6 animate-fade-in">
+                                
+                                {/* High Fidelity Earning Panel */}
+                                <div class="bg-gradient-to-b from-cardBg to-[#111622] rounded-3xl p-6 text-center border border-gray-800 shadow-xl relative overflow-hidden group">
+                                    <div class="absolute -top-10 -right-10 w-24 h-24 bg-accentPurp/10 rounded-full blur-xl group-hover:scale-150 transition duration-500"></div>
+                                    <p class="text-gray-400 text-xs uppercase tracking-widest font-semibold mb-2">Total Accumulated Points</p>
+                                    <div class="flex justify-center items-center gap-3 mb-5">
+                                        <div class="w-12 h-12 bg-accentGold/20 rounded-full flex items-center justify-center animate-bounce">
+                                            <span class="text-2xl text-accentGold">₮</span>
+                                        </div>
+                                        <h2 class="text-4xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white via-gray-100 to-accentGold">{user.balance}</h2>
+                                    </div>
+
+                                    <button 
+                                        onClick={handleWatchAdClaim}
+                                        class="w-full bg-gradient-to-r from-accentPurp to-indigo-600 hover:from-accentPurp/90 hover:to-indigo-600/90 text-white font-bold py-4 rounded-2xl shadow-lg shadow-accentPurp/20 active:scale-[0.98] transition-transform flex items-center justify-center gap-2"
+                                    >
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-play"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                                        Watch Ads & Earn Rewards (+250)
+                                    </button>
+                                </div>
+
+                                {/* Daily Streak Claims System */}
+                                <div class="bg-cardBg rounded-3xl p-5 border border-gray-800">
+                                    <div class="flex justify-between items-center mb-4">
+                                        <h3 class="text-sm font-bold tracking-wide uppercase text-gray-400">Streak System (Daily)</h3>
+                                        <span class="text-xs text-accentGold font-bold">{user.streak} / 7 Days Active</span>
+                                    </div>
+                                    <div class="grid grid-cols-4 gap-2.5 mb-4">
+                                        {[1, 2, 3, 4, 5, 6, 7].map((day) => {
+                                            const isClaimed = day <= user.streak;
+                                            const isCurrent = day === (user.streak % 7) + 1;
+                                            return (
+                                                <div 
+                                                    key={day}
+                                                    class={`rounded-xl p-2.5 text-center flex flex-col justify-between h-20 border transition-all ${
+                                                        isClaimed 
+                                                        ? 'bg-accentPurp/10 border-accentPurp/30' 
+                                                        : isCurrent 
+                                                        ? 'bg-[#1a233a] border-accentGold/50 animate-pulse' 
+                                                        : 'bg-[#0f1420] border-gray-900'
+                                                    }`}
+                                                >
+                                                    <span class="text-[10px] text-gray-500 font-semibold uppercase">Day {day}</span>
+                                                    <span class="text-xs font-extrabold text-accentGold">+{day * 100}</span>
+                                                    <span class="text-[10px] text-gray-400 font-bold">{isClaimed ? 'Claimed' : 'Locked'}</span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    <button 
+                                        onClick={handleDailyClaim}
+                                        class="w-full bg-[#1c2336] hover:bg-[#21293e] border border-gray-800 text-gray-200 font-bold py-3.5 rounded-2xl active:scale-[0.98] transition-all flex items-center justify-center gap-2"
+                                    >
+                                        Daily Login Check-In
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 2. GAME HUB PAGE VIEW */}
+                        {activeTab === 'games' && !activeGame && (
+                            <div class="space-y-4 animate-fade-in">
+                                <h2 class="text-xl font-bold tracking-tight mb-1">Play Games & Claim Rewards</h2>
+                                <p class="text-gray-400 text-xs mb-4">Watch dynamic Ad elements on finish to withdraw points.</p>
+                                
+                                {/* Game 1: Tapper */}
+                                <div class="bg-[#121825] border border-gray-800/80 rounded-3xl p-5 flex items-center justify-between group hover:border-accentPurp/50 transition-all duration-300">
+                                    <div class="flex items-center gap-4">
+                                        <div class="w-14 h-14 rounded-2xl bg-gradient-to-tr from-[#3b82f6] to-[#06b6d4] flex items-center justify-center text-white text-3xl font-bold shadow-md shadow-blue-500/10">
+                                            ☝️
+                                        </div>
+                                        <div>
+                                            <h3 class="font-bold text-sm">Coin Tap Game</h3>
+                                            <p class="text-[11px] text-gray-400 mt-1">Tap screen coin rapidly within limits.</p>
+                                        </div>
+                                    </div>
+                                    <button 
+                                        onClick={() => { setActiveGame('tap'); setTapScore(0); setTapEnergy(100); }}
+                                        class="bg-accentPurp hover:bg-accentPurp/90 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-lg transition-all"
+                                    >
+                                        PLAY
+                                    </button>
+                                </div>
+
+                                {/* Game 2: Spin Wheel */}
+                                <div class="bg-[#121825] border border-gray-800/80 rounded-3xl p-5 flex items-center justify-between group hover:border-accentPurp/50 transition-all duration-300">
+                                    <div class="flex items-center gap-4">
+                                        <div class="w-14 h-14 rounded-2xl bg-gradient-to-tr from-[#f59e0b] to-[#ef4444] flex items-center justify-center text-white text-3xl font-bold shadow-md shadow-amber-500/10">
+                                            🎡
+                                        </div>
+                                        <div>
+                                            <h3 class="font-bold text-sm">Lucky Wheels</h3>
+                                            <p class="text-[11px] text-gray-400 mt-1">Spin the jackpot circle layout wheel.</p>
+                                        </div>
+                                    </div>
+                                    <button 
+                                        onClick={() => { setActiveGame('spin'); setSpinResult(null); }}
+                                        class="bg-accentPurp hover:bg-accentPurp/90 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-lg transition-all"
+                                    >
+                                        PLAY
+                                    </button>
+                                </div>
+
+                                {/* Game 3: Lucky Box */}
+                                <div class="bg-[#121825] border border-gray-800/80 rounded-3xl p-5 flex items-center justify-between group hover:border-accentPurp/50 transition-all duration-300">
+                                    <div class="flex items-center gap-4">
+                                        <div class="w-14 h-14 rounded-2xl bg-gradient-to-tr from-[#10b981] to-[#14b8a6] flex items-center justify-center text-white text-3xl font-bold shadow-md shadow-emerald-500/10">
+                                            🎁
+                                        </div>
+                                        <div>
+                                            <h3 class="font-bold text-sm">Lucky Chest Box</h3>
+                                            <p class="text-[11px] text-gray-400 mt-1">Unlock hidden chests with surprises.</p>
+                                        </div>
+                                    </div>
+                                    <button 
+                                        onClick={() => { setActiveGame('box'); setOpenedBox(null); setBoxPayout(0); }}
+                                        class="bg-accentPurp hover:bg-accentPurp/90 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-lg transition-all"
+                                    >
+                                        PLAY
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* SUB-GAME 1 CONTAINER: TAPPER */}
+                        {activeGame === 'tap' && (
+                            <div class="space-y-6 text-center py-4 relative animate-fade-in select-none">
+                                <div class="flex justify-between items-center bg-[#131926] p-4 rounded-2xl border border-gray-800">
+                                    <div class="text-left">
+                                        <span class="text-[11px] text-gray-400">Score Session</span>
+                                        <h4 class="text-xl font-extrabold text-accentGold">{tapScore} / 50 Max</h4>
+                                    </div>
+                                    <button 
+                                        onClick={() => setActiveGame(null)} 
+                                        class="text-xs text-red-400 hover:text-red-300 font-bold"
+                                    >
+                                        Quit Game
+                                    </button>
+                                </div>
+
+                                <div 
+                                    onPointerDown={handleTapperClick}
+                                    class="relative w-56 h-56 mx-auto rounded-full bg-gradient-to-b from-[#1c243a] to-[#0f1422] flex items-center justify-center border-4 border-gray-800 active:scale-95 transition-all cursor-pointer shadow-2xl group shadow-accentPurp/5"
+                                >
+                                    <div class="absolute inset-4 rounded-full bg-gradient-to-tr from-accentGold to-amber-300 flex items-center justify-center shadow-inner">
+                                        <span class="text-6xl text-darkBg font-extrabold select-none">₮</span>
+                                    </div>
+                                    {clicks.map(click => (
+                                        <span 
+                                            key={click.id} 
+                                            style={{ left: click.x, top: click.y }}
+                                            class="absolute text-2xl font-bold text-accentGold select-none pointer-events-none animate-float-up"
+                                        >
+                                            +1
+                                        </span>
+                                    ))}
+                                </div>
+
+                                <div class="space-y-2 max-w-xs mx-auto">
+                                    <div class="flex justify-between text-xs text-gray-400">
+                                        <span>Energy Capacity</span>
+                                        <span>{tapEnergy}%</span>
+                                    </div>
+                                    <div class="w-full bg-[#131926] h-3 rounded-full overflow-hidden border border-gray-800">
+                                        <div class="bg-gradient-to-r from-accentPurp to-indigo-500 h-full transition-all duration-100" style={{ width: `${tapEnergy}%` }}></div>
+                                    </div>
+                                </div>
+
+                                <button 
+                                    disabled={tapScore === 0}
+                                    onClick={claimTapRewards}
+                                    class={`w-full font-bold py-4 rounded-2xl shadow-lg transition-transform ${tapScore > 0 ? 'bg-gradient-to-r from-green-500 to-emerald-600 active:scale-[0.98]' : 'bg-gray-800 text-gray-400 cursor-not-allowed'}`}
+                                >
+                                    Verify & Claim Rewards (Ad)
+                                </button>
+                            </div>
+                        )}
+
+                        {/* SUB-GAME 2 CONTAINER: SPIN WHEEL */}
+                        {activeGame === 'spin' && (
+                            <div class="space-y-6 text-center py-4 relative animate-fade-in">
+                                <div class="flex justify-between items-center bg-[#131926] p-4 rounded-2xl border border-gray-800">
+                                    <h4 class="text-sm font-bold text-gray-300">Golden Wheel Arena</h4>
+                                    <button onClick={() => setActiveGame(null)} class="text-xs text-red-400 hover:text-red-300 font-bold">Quit Game</button>
+                                </div>
+
+                                <div class="relative w-64 h-64 mx-auto flex items-center justify-center">
+                                    {/* Indicator */}
+                                    <div class="absolute -top-1 z-20 w-0 h-0 border-l-[15px] border-l-transparent border-r-[15px] border-r-transparent border-t-[25px] border-t-red-500"></div>
+                                    {/* Wheel Canvas rendering sectors [100, 50, 500, Try Again (0), 1000, 250] */}
+                                    <div 
+                                        style={{ transform: `rotate(${wheelRotation}deg)`, transition: 'transform 4s cubic-bezier(0.17, 0.67, 0.12, 0.99)' }}
+                                        class="w-full h-full rounded-full border-4 border-[#1c243a] bg-darkBg overflow-hidden relative shadow-2xl"
+                                    >
+                                        <div class="absolute w-full h-full flex items-center justify-center">
+                                            <div class="w-[2px] h-full bg-gray-800 absolute transform rotate-0"></div>
+                                            <div class="w-[2px] h-full bg-gray-800 absolute transform rotate-60"></div>
+                                            <div class="w-[2px] h-full bg-gray-800 absolute transform rotate-120"></div>
+                                        </div>
+                                        {/* Segments values */}
+                                        <div class="absolute inset-0 flex items-center justify-center text-[10px] font-black text-gray-300">
+                                            <span class="absolute transform -translate-y-20 rotate-0">100₮</span>
+                                            <span class="absolute transform translate-x-16 -translate-y-10 rotate-60">50₮</span>
+                                            <span class="absolute transform translate-x-16 translate-y-10 rotate-120">500₮</span>
+                                            <span class="absolute transform -translate-y-20 rotate-180 text-red-400">MISS</span>
+                                            <span class="absolute transform -translate-x-16 translate-y-10 rotate-240">1000₮</span>
+                                            <span class="absolute transform -translate-x-16 -translate-y-10 rotate-300">250₮</span>
+                                        </div>
+                                    </div>
+                                    <div class="absolute w-12 h-12 bg-white rounded-full z-10 flex items-center justify-center shadow-lg text-darkBg font-black">
+                                        GO
+                                    </div>
+                                </div>
+
+                                <div class="flex flex-col gap-3">
+                                    <button 
+                                        disabled={isSpinning}
+                                        onClick={handleSpinTrigger}
+                                        class={`w-full font-bold py-4 rounded-2xl shadow-lg transition-transform ${isSpinning ? 'bg-gray-800 text-gray-500' : 'bg-gradient-to-r from-accentPurp to-indigo-600 hover:from-accentPurp/90 hover:to-indigo-600/90'}`}
+                                    >
+                                        {isSpinning ? 'Jackpot Spinning...' : 'Spin Wheel'}
+                                    </button>
+                                    
+                                    {spinResult !== null && (
+                                        <div class="bg-[#111827] border border-gray-800 rounded-2xl p-4 animate-scale-up">
+                                            <p class="text-xs text-gray-400 mb-2">You Landed on segment</p>
+                                            <h5 class="text-2xl font-extrabold text-accentGold mb-3">{spinResult > 0 ? `+${spinResult} coins` : 'Try Again'}</h5>
+                                            {spinResult > 0 && (
+                                                <button 
+                                                    onClick={claimSpinRewards}
+                                                    class="w-full bg-gradient-to-r from-green-500 to-emerald-600 text-white font-bold py-3 rounded-xl hover:from-green-600 active:scale-95 transition-transform"
+                                                >
+                                                    Claim Award via Ad View
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* SUB-GAME 3 CONTAINER: LUCKY BOX */}
+                        {activeGame === 'box' && (
+                            <div class="space-y-6 text-center py-4 relative animate-fade-in">
+                                <div class="flex justify-between items-center bg-[#131926] p-4 rounded-2xl border border-gray-800">
+                                    <h4 class="text-sm font-bold text-gray-300">Mystery Chest Arena</h4>
+                                    <button onClick={() => setActiveGame(null)} class="text-xs text-red-400 hover:text-red-300 font-bold">Quit Game</button>
+                                </div>
+
+                                <div class="grid grid-cols-3 gap-3 my-8">
+                                    {[1, 2, 3].map(id => {
+                                        const isOpen = openedBox === id;
+                                        return (
+                                            <div 
+                                                key={id}
+                                                onClick={() => handleOpenBox(id)}
+                                                class={`h-32 border rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all ${
+                                                    isOpen 
+                                                    ? 'bg-accentPurp/10 border-accentPurp/40 scale-95' 
+                                                    : 'bg-cardBg border-gray-800 hover:border-gray-700 active:scale-95'
+                                                }`}
+                                            >
+                                                <span class="text-4xl mb-2">{isOpen ? '🔓' : '🔒'}</span>
+                                                <span class="text-xs font-bold text-gray-400">{isOpen ? 'Revealed' : `Chest #${id}`}</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {boxPayout > 0 && (
+                                    <div class="bg-[#111827] border border-gray-800 rounded-2xl p-4 animate-scale-up">
+                                        <p class="text-xs text-gray-400 mb-1">Revealed Prize</p>
+                                        <h5 class="text-2xl font-extrabold text-accentGold mb-3">+{boxPayout} coins</h5>
+                                        <button 
+                                            onClick={claimBoxReward}
+                                            class="w-full bg-gradient-to-r from-green-500 to-emerald-600 text-white font-bold py-3 rounded-xl hover:from-green-600 active:scale-95 transition-transform"
+                                        >
+                                            Authenticate Payout Claim (Ad)
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+
+                        {/* 3. SOCIAL/CHALLENGE TASKS VIEW */}
+                        {activeTab === 'tasks' && (
+                            <div class="space-y-4 animate-fade-in">
+                                <h2 class="text-xl font-bold tracking-tight mb-1">Task Rewards</h2>
+                                <p class="text-gray-400 text-xs mb-3">Earn bonuses. Completing actions requires verify ad view.</p>
+
+                                {/* Tabs */}
+                                <div class="flex gap-2 p-1 bg-[#121825] border border-gray-800 rounded-xl mb-4 text-xs font-bold">
+                                    {['social', 'daily', 'achievement'].map((cat) => (
+                                        <button
+                                            key={cat}
+                                            onClick={() => setTaskCategory(cat)}
+                                            class={`flex-1 py-2 rounded-lg text-center transition-all capitalize ${taskCategory === cat ? 'bg-accentPurp text-white shadow-md' : 'text-gray-400 hover:text-white'}`}
+                                        >
+                                            {cat}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                <div class="space-y-3">
+                                    {tasksList.filter(t => t.category === taskCategory).map(task => (
+                                        <div key={task.id} class="bg-cardBg border border-gray-800/80 rounded-2xl p-4 flex items-center justify-between gap-4">
+                                            <div class="flex-1">
+                                                <h4 class="text-sm font-bold">{task.title}</h4>
+                                                <p class="text-[11px] text-gray-400 mt-1">{task.description}</p>
+                                                <span class="text-xs font-extrabold text-accentGold mt-2 block">+{task.reward} points</span>
+                                            </div>
+                                            <div>
+                                                {task.status === 'start' && (
+                                                    <button 
+                                                        onClick={() => handleTaskAction(task)}
+                                                        class="bg-[#1c2438] hover:bg-[#232d46] text-white font-semibold text-xs px-3.5 py-2 rounded-xl border border-gray-800 shadow"
+                                                    >
+                                                        Start
+                                                    </button>
+                                                )}
+                                                {task.status === 'claim' && (
+                                                    <button 
+                                                        onClick={() => handleTaskAction(task)}
+                                                        class="bg-accentGold text-darkBg font-bold text-xs px-3.5 py-2 rounded-xl shadow-md animate-pulse"
+                                                    >
+                                                        Claim (Ad)
+                                                    </button>
+                                                )}
+                                                {task.status === 'completed' && (
+                                                    <span class="text-xs text-green-500 font-bold flex items-center gap-1">
+                                                        Done ✅
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 4. WALLET MANAGEMENT & TRANSACTIONS VIEW */}
+                        {activeTab === 'wallet' && (
+                            <div class="space-y-5 animate-fade-in">
+                                
+                                {/* Balance Board */}
+                                <div class="bg-gradient-to-tr from-cardBg to-[#161d2d] border border-gray-800 rounded-3xl p-5 relative overflow-hidden">
+                                    <div class="flex justify-between items-center mb-1">
+                                        <span class="text-xs text-gray-400 font-semibold tracking-wider uppercase">Withdrawable Balance</span>
+                                        <span class="text-[10px] bg-emerald-500/10 text-emerald-500 px-2.5 py-0.5 rounded-full border border-emerald-500/20 font-bold">Secure</span>
+                                    </div>
+                                    <div class="flex items-baseline gap-2 mb-3">
+                                        <h3 class="text-3xl font-black text-accentGold">{user.balance}</h3>
+                                        <span class="text-xs text-gray-400">coins</span>
+                                    </div>
+                                    <p class="text-[10px] text-gray-500">Minimum payout starts at 5,000 coins (Approx: 5 TON)</p>
+                                </div>
+
+                                {/* Payout form */}
+                                <div class="bg-cardBg border border-gray-800 rounded-3xl p-5">
+                                    <h4 class="text-sm font-bold uppercase tracking-wider text-gray-400 mb-4">Request Withdrawal</h4>
+                                    <form onSubmit={handleWithdrawSubmit} class="space-y-4">
+                                        
+                                        {/* Network Selector */}
+                                        <div class="space-y-1">
+                                            <label class="text-[11px] text-gray-400 font-semibold">Select Payment Network</label>
+                                            <select 
+                                                value={payoutMethod}
+                                                onChange={(e) => setPayoutMethod(e.target.value)}
+                                                class="w-full bg-[#101522] border border-gray-800 rounded-xl px-3 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-accentPurp transition-all"
+                                            >
+                                                <option value="TON">TON Network (Toncoin)</option>
+                                                <option value="BEP20">BNB Chain (BEP-20 / USDT)</option>
+                                            </select>
+                                        </div>
+
+                                        {/* Address Input */}
+                                        <div class="space-y-1">
+                                            <label class="text-[11px] text-gray-400 font-semibold">Wallet Address</label>
+                                            <input 
+                                                type="text" 
+                                                required
+                                                placeholder="Enter destination address..."
+                                                value={walletAddress}
+                                                onChange={(e) => setWalletAddress(e.target.value)}
+                                                class="w-full bg-[#101522] border border-gray-800 rounded-xl px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-accentPurp transition-all"
+                                            />
+                                        </div>
+
+                                        {/* Withdrawal Amount */}
+                                        <div class="space-y-1">
+                                            <label class="text-[11px] text-gray-400 font-semibold">Amount to Withdraw</label>
+                                            <input 
+                                                type="number" 
+                                                required
+                                                min="5000"
+                                                placeholder="e.g. 5000"
+                                                value={withdrawAmount}
+                                                onChange={(e) => setWithdrawAmount(e.target.value)}
+                                                class="w-full bg-[#101522] border border-gray-800 rounded-xl px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-accentPurp transition-all"
+                                            />
+                                        </div>
+
+                                        <button 
+                                            type="submit"
+                                            class="w-full bg-gradient-to-r from-accentPurp to-indigo-600 hover:from-accentPurp/90 hover:to-indigo-600/90 text-white font-bold py-3.5 rounded-2xl shadow-lg transition-transform"
+                                        >
+                                            Submit Withdrawal Request
+                                        </button>
+                                    </form>
+                                </div>
+
+                                {/* Transaction History Logs */}
+                                <div class="bg-cardBg border border-gray-800 rounded-3xl p-5">
+                                    <h4 class="text-sm font-bold uppercase tracking-wider text-gray-400 mb-3">Earn History Log</h4>
+                                    <div class="space-y-3.5 max-h-48 overflow-y-auto hide-scrollbar">
+                                        {transactions.map(tx => (
+                                            <div key={tx.id} class="flex items-center justify-between border-b border-gray-900 pb-2.5 last:border-b-0 last:pb-0">
+                                                <div>
+                                                    <p class="text-xs font-bold text-gray-200 capitalize">{tx.type.replace('_', ' ')}</p>
+                                                    <p class="text-[10px] text-gray-500 mt-0.5">{tx.details || "Secured ad reward credit"}</p>
+                                                </div>
+                                                <div class="text-right">
+                                                    <span class={`text-sm font-extrabold ${tx.amount > 0 ? 'text-green-500' : 'text-red-400'}`}>
+                                                        {tx.amount > 0 ? `+${tx.amount}` : tx.amount}
+                                                    </span>
+                                                    <p class="text-[9px] text-gray-500 mt-0.5 capitalize">{tx.status}</p>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Bottom Navigation Menu Panel */}
+                    <nav class="flex justify-around items-center bg-[#0c1220] border-t border-gray-800/80 py-3.5 px-3">
+                        <button 
+                            onClick={() => { setActiveTab('home'); setActiveGame(null); }}
+                            class={`flex flex-col items-center gap-1 transition-all ${activeTab === 'home' ? 'text-accentPurp font-bold scale-105' : 'text-gray-500 hover:text-white'}`}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-layout-dashboard"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+                            <span class="text-[10px]">Home</span>
+                        </button>
+                        <button 
+                            onClick={() => { setActiveTab('games'); }}
+                            class={`flex flex-col items-center gap-1 transition-all ${activeTab === 'games' || activeGame ? 'text-accentPurp font-bold scale-105' : 'text-gray-500 hover:text-white'}`}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-gamepad-2"><line x1="6" x2="10" y1="12" y2="12"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="15" x2="15.01" y1="13" y2="13"/><line x1="18" x2="18.01" y1="11" y2="11"/><rect width="20" height="12" x="2" y="6" rx="4"/></svg>
+                            <span class="text-[10px]">Games Center</span>
+                        </button>
+                        <button 
+                            onClick={() => { setActiveTab('tasks'); setActiveGame(null); }}
+                            class={`flex flex-col items-center gap-1 transition-all ${activeTab === 'tasks' ? 'text-accentPurp font-bold scale-105' : 'text-gray-500 hover:text-white'}`}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-list-todo"><rect width="6" height="6" x="3" y="5" rx="1"/><rect width="6" height="6" x="3" y="13" rx="1"/><path d="M13 8h8"/><path d="M13 16h8"/></svg>
+                            <span class="text-[10px]">Tasks</span>
+                        </button>
+                        <button 
+                            onClick={() => { setActiveTab('wallet'); setActiveGame(null); }}
+                            class={`flex flex-col items-center gap-1 transition-all ${activeTab === 'wallet' ? 'text-accentPurp font-bold scale-105' : 'text-gray-500 hover:text-white'}`}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-wallet-2"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M16 12a2 2 0 0 0 0 4h5v-4z"/></svg>
+                            <span class="text-[10px]">Wallet</span>
+                        </button>
+                    </nav>
+
+                    {/* Toast Notification element */}
+                    <div 
+                        class={`absolute left-5 right-5 top-8 p-3.5 rounded-2xl shadow-xl border text-xs font-bold transition-all duration-300 transform z-50 flex items-center justify-between ${
+                            toast.visible ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 -translate-y-4 scale-95 pointer-events-none'
+                        } ${
+                            toast.type === 'error' ? 'bg-[#291419] border-red-500/30 text-red-400' :
+                            toast.type === 'success' ? 'bg-[#142921] border-green-500/30 text-green-400' :
+                            'bg-[#141b2c] border-accentPurp/30 text-gray-300'
+                        }`}
+                    >
+                        <span>{toast.message}</span>
+                        <button onClick={() => setToast(prev => ({ ...prev, visible: false }))} class="text-sm">×</button>
+                    </div>
+
+                    {/* Fallback Adsgram Simulation Modal overlay */}
+                    {adModal.visible && (
+                        <div class="absolute inset-0 bg-darkBg z-50 flex flex-col justify-between p-6 animate-fade-in">
+                            <div class="flex justify-between items-center mt-4">
+                                <span class="bg-[#121825] px-4 py-1.5 rounded-full text-[10px] font-bold text-accentGold border border-gray-800">
+                                    Adsgram Verified Simulation Mode
+                                </span>
+                                <span class="text-xs text-gray-400">Ad Block ID: {ADS_BLOCK_ID}</span>
+                            </div>
+                            <div class="my-auto text-center space-y-6">
+                                <div class="w-20 h-20 bg-accentPurp/10 rounded-full flex items-center justify-center mx-auto text-4xl animate-pulse">
+                                    🎥
+                                </div>
+                                <div class="space-y-2">
+                                    <h4 class="text-lg font-bold">Earn points instantly by completing video viewings!</h4>
+                                    <p class="text-xs text-gray-400 max-w-xs mx-auto">This fallback simulates live Adsgram views. In production, this launches the real Adsgram overlay frame.</p>
+                                </div>
+                                <div class="flex items-center justify-center gap-1.5 text-accentGold text-sm font-bold">
+                                    <span>Time Left: 5 seconds</span>
+                                </div>
+                            </div>
+                            <div class="flex gap-3">
+                                <button 
+                                    onClick={() => adModal.reject({ error: true, description: "Closed earlier" })}
+                                    class="flex-1 bg-[#151b2c] border border-gray-800 hover:bg-gray-800 text-gray-300 font-bold py-3.5 rounded-2xl text-sm"
+                                >
+                                    Close Ad
+                                </button>
+                                <button 
+                                    onClick={() => adModal.resolve()}
+                                    class="flex-1 bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-bold py-3.5 rounded-2xl text-sm shadow-lg shadow-green-500/10"
+                                >
+                                    Complete Viewing
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
